@@ -28,5 +28,5 @@ audit logging, or persistence require:
 - a rollback or migration note;
 - an explicit statement of assumptions.
 
-AI-assisted contributions are welcome, but the contributor remains responsible
-for understanding and validating every line.
+Every contributor is responsible for understanding, testing and defending the
+behaviour introduced by their change.

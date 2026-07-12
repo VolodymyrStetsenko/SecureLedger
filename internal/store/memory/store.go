@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/VolodymyrStetsenko/secureledger/internal/domain"
 	"github.com/VolodymyrStetsenko/secureledger/internal/store"
@@ -49,6 +50,10 @@ func systemAccountID(currency string) string {
 	return "system:equity:" + currency
 }
 
+func (s *Store) Ping(ctx context.Context) error {
+	return ctx.Err()
+}
+
 func (s *Store) CreateAccount(ctx context.Context, in store.CreateAccountInput) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -56,7 +61,8 @@ func (s *Store) CreateAccount(ctx context.Context, in store.CreateAccountInput) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if in.Account.ID == "" || in.Account.OwnerID == "" || in.Account.CreatedAt.IsZero() ||
+	if in.Account.ID == "" || len(in.Account.ID) > 128 ||
+		in.Account.OwnerID == "" || len(in.Account.OwnerID) > 128 || in.Account.CreatedAt.IsZero() ||
 		in.Account.System || strings.HasPrefix(in.Account.ID, "system:") {
 		return fmt.Errorf("%w: account id, owner and creation time are required", domain.ErrInvalidInput)
 	}
@@ -69,8 +75,8 @@ func (s *Store) CreateAccount(ctx context.Context, in store.CreateAccountInput) 
 	if in.Account.BalanceMinor < 0 {
 		return fmt.Errorf("%w: opening balance cannot be negative", domain.ErrInvalidInput)
 	}
-	if in.Audit.ID == "" || in.Audit.ActorID == "" || in.Audit.Action == "" || in.Audit.ResourceID != in.Account.ID || in.Audit.CreatedAt.IsZero() {
-		return fmt.Errorf("%w: valid account audit record is required", domain.ErrInvalidInput)
+	if err := domain.ValidateAuditRecord(in.Audit, "", in.Account.ID); err != nil {
+		return err
 	}
 	if _, exists := s.audits[in.Audit.ID]; exists {
 		return fmt.Errorf("%w: duplicate audit id", domain.ErrInvalidInput)
@@ -151,6 +157,26 @@ func (s *Store) ApplyTransfer(ctx context.Context, in store.ApplyTransferInput) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if in.Transfer.ID == "" || len(in.Transfer.ID) > 128 ||
+		len(in.Transfer.IdempotencyKey) < 8 || len(in.Transfer.IdempotencyKey) > 128 ||
+		in.Transfer.ActorID == "" || len(in.Transfer.ActorID) > 128 || in.Transfer.CreatedAt.IsZero() ||
+		in.Transfer.Intent.FromAccountID == "" || len(in.Transfer.Intent.FromAccountID) > 128 ||
+		in.Transfer.Intent.ToAccountID == "" || len(in.Transfer.Intent.ToAccountID) > 128 ||
+		utf8.RuneCountInString(in.Transfer.Intent.Description) > 200 {
+		return store.TransferResult{}, fmt.Errorf("%w: transfer identity fields are required", domain.ErrInvalidInput)
+	}
+	if in.PostingIDs[0] == "" || in.PostingIDs[1] == "" || in.PostingIDs[0] == in.PostingIDs[1] {
+		return store.TransferResult{}, fmt.Errorf("%w: two unique posting ids are required", domain.ErrInvalidInput)
+	}
+	if err := domain.ValidateAuditRecord(in.Audit, in.Transfer.ActorID, in.Transfer.ID); err != nil {
+		return store.TransferResult{}, err
+	}
+	if in.Risk != nil {
+		if err := domain.ValidateRiskEvent(*in.Risk, in.Transfer.ID); err != nil {
+			return store.TransferResult{}, err
+		}
+	}
+
 	scope := idempotencyScope{actorID: in.Transfer.ActorID, key: in.Transfer.IdempotencyKey}
 	if existing, ok := s.idempotency[scope]; ok {
 		if !existing.transfer.Intent.Equal(in.Transfer.Intent) {
@@ -158,30 +184,18 @@ func (s *Store) ApplyTransfer(ctx context.Context, in store.ApplyTransferInput) 
 		}
 		return store.TransferResult{Transfer: existing.transfer, Replayed: true}, nil
 	}
-	if in.Transfer.ID == "" || in.Transfer.IdempotencyKey == "" || in.Transfer.ActorID == "" || in.Transfer.CreatedAt.IsZero() {
-		return store.TransferResult{}, fmt.Errorf("%w: transfer identity fields are required", domain.ErrInvalidInput)
-	}
 	if _, exists := s.transactions[in.Transfer.ID]; exists {
 		return store.TransferResult{}, fmt.Errorf("%w: duplicate transaction id", domain.ErrInvalidInput)
-	}
-	if in.PostingIDs[0] == "" || in.PostingIDs[1] == "" || in.PostingIDs[0] == in.PostingIDs[1] {
-		return store.TransferResult{}, fmt.Errorf("%w: two unique posting ids are required", domain.ErrInvalidInput)
 	}
 	for _, id := range in.PostingIDs {
 		if _, exists := s.postings[id]; exists {
 			return store.TransferResult{}, fmt.Errorf("%w: duplicate posting id", domain.ErrInvalidInput)
 		}
 	}
-	if in.Audit.ID == "" || in.Audit.ActorID != in.Transfer.ActorID || in.Audit.ResourceID != in.Transfer.ID || in.Audit.CreatedAt.IsZero() {
-		return store.TransferResult{}, fmt.Errorf("%w: valid transfer audit record is required", domain.ErrInvalidInput)
-	}
 	if _, exists := s.audits[in.Audit.ID]; exists {
 		return store.TransferResult{}, fmt.Errorf("%w: duplicate audit id", domain.ErrInvalidInput)
 	}
 	if in.Risk != nil {
-		if in.Risk.ID == "" || in.Risk.TransferID != in.Transfer.ID || in.Risk.CreatedAt.IsZero() {
-			return store.TransferResult{}, fmt.Errorf("%w: valid risk event is required", domain.ErrInvalidInput)
-		}
 		if _, exists := s.risks[in.Risk.ID]; exists {
 			return store.TransferResult{}, fmt.Errorf("%w: duplicate risk event id", domain.ErrInvalidInput)
 		}

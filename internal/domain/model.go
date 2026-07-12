@@ -21,7 +21,7 @@ type Principal struct {
 }
 
 func (p Principal) Valid() bool {
-	if strings.TrimSpace(p.ID) == "" {
+	if strings.TrimSpace(p.ID) == "" || len(p.ID) > 128 {
 		return false
 	}
 	switch p.Role {
@@ -127,6 +127,24 @@ type AuditRecord struct {
 	CreatedAt  time.Time      `json:"created_at"`
 }
 
+func ValidateAuditRecord(record AuditRecord, expectedActorID, expectedResourceID string) error {
+	if strings.TrimSpace(record.ID) == "" || len(record.ID) > 128 ||
+		strings.TrimSpace(record.ActorID) == "" || len(record.ActorID) > 128 ||
+		strings.TrimSpace(record.Action) == "" || len(record.Action) > 128 ||
+		strings.TrimSpace(record.ResourceID) == "" || len(record.ResourceID) > 128 ||
+		strings.TrimSpace(record.Outcome) == "" || len(record.Outcome) > 64 ||
+		record.CreatedAt.IsZero() {
+		return fmt.Errorf("%w: invalid audit record", ErrInvalidInput)
+	}
+	if expectedActorID != "" && record.ActorID != expectedActorID {
+		return fmt.Errorf("%w: audit actor does not match operation actor", ErrInvalidInput)
+	}
+	if record.ResourceID != expectedResourceID {
+		return fmt.Errorf("%w: audit resource does not match operation resource", ErrInvalidInput)
+	}
+	return nil
+}
+
 type RiskEvent struct {
 	ID         string    `json:"id"`
 	Type       string    `json:"type"`
@@ -134,4 +152,20 @@ type RiskEvent struct {
 	TransferID string    `json:"transfer_id"`
 	Reason     string    `json:"reason"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+func ValidateRiskEvent(event RiskEvent, expectedTransferID string) error {
+	if strings.TrimSpace(event.ID) == "" || len(event.ID) > 128 ||
+		strings.TrimSpace(event.Type) == "" || len(event.Type) > 64 ||
+		event.TransferID != expectedTransferID ||
+		strings.TrimSpace(event.Reason) == "" || len(event.Reason) > 500 ||
+		event.CreatedAt.IsZero() {
+		return fmt.Errorf("%w: invalid risk event", ErrInvalidInput)
+	}
+	switch event.Severity {
+	case "low", "medium", "high", "critical":
+		return nil
+	default:
+		return fmt.Errorf("%w: invalid risk severity", ErrInvalidInput)
+	}
 }

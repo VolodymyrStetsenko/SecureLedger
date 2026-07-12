@@ -1,196 +1,238 @@
 # SecureLedger
 
-**A security-focused financial ledger reference system by Volodymyr Stetsenko.**
+[![CI](https://github.com/VolodymyrStetsenko/SecureLedger/actions/workflows/ci.yml/badge.svg)](https://github.com/VolodymyrStetsenko/SecureLedger/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/VolodymyrStetsenko/SecureLedger/actions/workflows/codeql.yml/badge.svg)](https://github.com/VolodymyrStetsenko/SecureLedger/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-SecureLedger is an executable portfolio project that demonstrates how to reason
-about money movement, double-entry invariants, idempotency, authorisation,
-concurrency, auditability and operational risk in a small Go service.
+SecureLedger is a Go reference service for accountable money movement. It
+implements a balanced double-entry journal, atomic transfers, durable
+PostgreSQL persistence, actor-scoped idempotency, ownership-aware
+authorisation, audit evidence, risk-event delivery and ledger reconciliation.
 
-It is intentionally **not marketed as production banking software**. The goal is
-to make important design decisions inspectable, testable and discussable during
-engineering or product-security interviews.
+The repository is deliberately explicit about its security boundary. It is a
+working financial-ledger reference implementation, not a licensed bank, a
+payment processor, or certified software for holding real customer funds.
 
-## Why this project exists
+## Engineering goals
 
-A strong security portfolio should contain more than vulnerability write-ups.
-It should show that the author can:
+The design concentrates on failure modes that are easy to miss in an ordinary
+CRUD service:
 
-- define assets and trust boundaries;
-- preserve financial invariants under concurrency;
-- design safe failure behaviour;
-- make replayed requests harmless;
-- separate authentication assumptions from authorisation policy;
-- produce evidence through tests, audit records and architecture decisions;
-- explain what is still missing before production.
+- a transfer must debit and credit in one atomic commit;
+- concurrent requests must not spend the same balance twice;
+- an ambiguous client retry must not create another transfer;
+- every journal transaction must contain exactly its expected postings and sum
+  to zero;
+- account balances must be reconcilable from immutable posting history;
+- audit and risk records must be committed with the financial state they
+  describe;
+- an account identifier must never be treated as proof of ownership.
 
-## Capabilities
+## Implemented capabilities
 
-- multi-currency accounts using integer minor units;
-- balanced journal transactions: every transaction sums to zero;
-- atomic transfers with insufficient-funds protection;
-- actor-scoped idempotency keys that prevent duplicate money movement;
-- account-owner and operator/admin authorisation rules;
-- configurable per-transfer limits;
-- append-only audit records;
-- risk events for high-value transfers;
-- bounded JSON request bodies and strict decoding;
-- race-safe in-memory storage;
-- background risk-event dispatcher;
-- unit, integration, concurrency and HTTP tests;
-- complete OpenAPI response schemas, threat model, ADRs and CI configuration;
-- executable PostgreSQL target-schema checks for balance and append-only constraints.
+| Area | Implementation |
+|---|---|
+| Money model | Signed `int64` minor units; no floating-point arithmetic |
+| Accounting | Two-posting transfers and opening entries offset by internal equity accounts |
+| Atomicity | One repository operation for balances, postings, audit record and optional risk event |
+| PostgreSQL | `SERIALIZABLE` transactions, deterministic row locks and bounded retry for serialization/deadlock failures |
+| Concurrency | Overspend protection in both mutex-backed memory and PostgreSQL adapters |
+| Idempotency | Mandatory 8–128 character key, scoped by actor and bound to an immutable SHA-256 request fingerprint |
+| Authorisation | Customer ownership checks plus operator, administrator and auditor policies |
+| Auditability | Append-only audit rows and immutable journal history enforced by database triggers |
+| Risk delivery | Transactional PostgreSQL outbox, leased batch claims, retry backoff and at-least-once publication |
+| Reconciliation | Read-only repeatable snapshot comparing stored balances with all postings |
+| HTTP boundary | Strict JSON, 1 MiB body limit, stable domain errors, security headers and server timeouts |
+| Delivery | OpenAPI 3.1, non-root distroless image, Docker Compose, CI, CodeQL and Dependabot |
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    C[Client] -->|HTTP + idempotency key| API[HTTP API]
-    API --> APP[Application service]
-    APP --> AUTHZ[Authorisation policy]
-    APP --> REPO[Ledger repository]
-    REPO --> ACC[(Accounts)]
-    REPO --> J[(Balanced journal)]
-    REPO --> A[(Audit records)]
-    REPO --> R[(Risk events)]
-    APP --> D[Background risk dispatcher]
+flowchart TB
+    Client["API client"] --> HTTP["HTTP boundary"]
+    HTTP --> App["Application policy"]
+    App --> Repo["Repository atomicity boundary"]
+    Repo --> Memory["In-memory adapter"]
+    Repo --> PG["PostgreSQL adapter"]
+    PG --> Ledger[("Accounts + journal + audit")]
+    PG --> Outbox[("Risk outbox")]
+    Outbox --> Worker["At-least-once worker"]
 ```
 
-See [docs/architecture.md](docs/architecture.md) and
-[docs/threat-model.md](docs/threat-model.md).
+The in-memory adapter is useful for fast local execution and deterministic unit
+tests. The PostgreSQL adapter is the durable path and is the subject of
+integration and concurrency tests. See [Architecture](docs/architecture.md),
+[PostgreSQL design](docs/postgresql-design.md) and the
+[ADRs](docs/adr/).
 
 ## Quick start
+
+### Complete PostgreSQL-backed stack
+
+Requirements: Docker Engine with the Compose plugin, `curl` and `jq`.
+
+```bash
+git clone https://github.com/VolodymyrStetsenko/SecureLedger.git
+cd SecureLedger
+make compose-up
+curl --fail http://localhost:8080/readyz
+./scripts/demo.sh
+```
+
+`make compose-up` starts PostgreSQL 17, applies the initial schema on a new
+database volume, builds the non-root application image and waits for readiness.
+Both ports bind to `127.0.0.1` only.
+
+Stop the stack without deleting ledger data:
+
+```bash
+make compose-down
+```
+
+### Fast in-memory mode
 
 Requirements: Go 1.26 or later.
 
 ```bash
-git clone https://github.com/VolodymyrStetsenko/secureledger.git
-cd secureledger
 make test
 make run
 ```
 
-The API listens on `:8080` by default.
+State in this mode exists only for the lifetime of the process. The API listens
+on `http://localhost:8080` unless `SECURELEDGER_ADDR` is changed.
 
-A minimal non-root container image is also included:
+## API walkthrough
 
-```bash
-docker build -t secureledger:local .
-docker run --rm -p 8080:8080 secureledger:local
-```
+Identity headers in these examples are a development boundary, not real
+authentication. Do not expose this configuration to an untrusted network.
 
-### Create two accounts
-
-The development identity boundary uses headers. This is deliberately insecure
-for internet deployment and is documented in
-[docs/security-assumptions.md](docs/security-assumptions.md).
+Create the funded source account:
 
 ```bash
-curl -sS -X POST http://localhost:8080/v1/accounts \
+curl --fail-with-body -sS -X POST http://localhost:8080/v1/accounts \
   -H 'Content-Type: application/json' \
   -H 'X-Principal-ID: operator-1' \
   -H 'X-Principal-Role: operator' \
-  -d '{"owner_id":"alice","currency":"GBP","opening_balance_minor":10000}'
+  --data '{"owner_id":"alice","currency":"GBP","opening_balance_minor":10000}'
 ```
 
-Create a second account for `bob`, copy both returned IDs, then transfer:
+Create a zero-balance destination account in the same way with `bob` as the
+owner. Then use the returned account IDs:
 
 ```bash
-curl -sS -X POST http://localhost:8080/v1/transfers \
+curl --fail-with-body -sS -X POST http://localhost:8080/v1/transfers \
   -H 'Content-Type: application/json' \
   -H 'X-Principal-ID: alice' \
   -H 'X-Principal-Role: customer' \
-  -H 'Idempotency-Key: demo-transfer-001' \
-  -d '{
-    "from_account_id":"ACCOUNT_A",
-    "to_account_id":"ACCOUNT_B",
+  -H 'Idempotency-Key: transfer-2026-0001' \
+  --data '{
+    "from_account_id":"SOURCE_ACCOUNT_ID",
+    "to_account_id":"DESTINATION_ACCOUNT_ID",
     "amount_minor":2500,
-    "description":"Demo transfer"
+    "description":"Invoice 2026-0001"
   }'
 ```
 
-Replaying the exact request with the same idempotency key returns the original
-transfer and does not move funds twice. Keys are scoped to the asserted actor, so
-two independent actors may use the same client-generated key without colliding.
+The first successful request returns `201 Created`. Repeating the exact request
+with the same actor and key returns `200 OK`, the original transfer and
+`Idempotent-Replayed: true`; it does not add postings or move funds again.
+Reusing the key with different transfer fields returns `409 Conflict`.
+
+The complete contract, including every response schema, is in
+[api/openapi.yaml](api/openapi.yaml).
 
 ## Core invariants
 
-1. Amounts are positive integers in minor currency units.
-2. Each journal transaction contains at least two postings.
-3. The signed sum of postings for a transaction is exactly zero.
-4. A normal customer account cannot become negative.
-5. Source and destination currencies must match.
-6. A given actor and idempotency-key pair maps to one immutable transfer intent.
-7. Audit records are appended for security-relevant actions.
-8. The API never trusts an account ID alone for authorisation.
+1. Monetary inputs are positive integers in minor currency units.
+2. Each committed journal transaction has exactly its declared number of
+   postings.
+3. The signed sum of those postings is zero.
+4. A non-system account cannot have a negative balance.
+5. A transfer cannot cross currencies or target its own source account.
+6. The source debit, destination credit, postings, audit record and risk event
+   either commit together or do not commit.
+7. An `(actor_id, idempotency_key)` pair identifies one immutable transfer
+   intent.
+8. Customer access to an account depends on ownership, not knowledge of its ID.
+9. Materialised balances equal the sum of all postings for each account.
 
-The tests in `internal/store/memory` and `internal/app` are the main evidence for
-these claims.
+The same repository contract is exercised against both adapters. PostgreSQL
+adds deferred balance constraints, append-only triggers, unique idempotency
+constraints and real concurrent transaction tests.
 
 ## Repository map
 
 ```text
-api/                    OpenAPI contract
-cmd/secureledger/       executable
-docs/                   architecture, threat model, ADRs
-internal/app/           use cases and policy orchestration
-internal/domain/        financial model and validation
-internal/httpapi/       HTTP boundary
-internal/risk/          asynchronous alert dispatcher
-internal/store/         repository contract
-internal/store/memory/  race-safe executable adapter
-deploy/postgres/        constrained target schema (adapter not implemented)
-scripts/                local demo and PostgreSQL schema checks
+api/                         OpenAPI 3.1 contract
+cmd/secureledger/            HTTP service executable
+cmd/secureledger-reconcile/  PostgreSQL integrity-check executable
+deploy/postgres/             Ordered database migration
+docs/                        Architecture, operations, security and decisions
+internal/app/                Use cases, validation and authorisation policy
+internal/domain/             Financial types and accounting invariants
+internal/httpapi/            HTTP parsing, error mapping and middleware
+internal/risk/               Process-local dispatcher and durable outbox worker
+internal/store/              Atomic repository contract
+internal/store/memory/       Concurrency-safe volatile adapter
+internal/store/postgres/     Durable transactional adapter and reconciliation
+scripts/                     Reproducible demo and schema verification
 ```
 
-## Validation
+## Development commands
+
+Run `make help` for the authoritative list. The main quality gates are:
 
 ```bash
-make check
-make test-race
-make coverage
+make check                 # format, vet, race-enabled tests and builds
+make test-integration      # PostgreSQL adapter tests under the race detector
+make coverage              # local coverage report
+make reconcile-postgres    # compare balances with posting history
 ```
 
-CI repeats formatting, vet, race-enabled tests, coverage collection, build, and
-PostgreSQL schema checks. It also enforces a 65% repository-wide coverage floor
-and lints the OpenAPI document. The schema test proves that balanced transactions
-commit, unbalanced transactions fail at the deferred constraint boundary, and
-historical postings reject update/delete operations.
+CI runs on every pull request and on `main`. It validates formatting, static
+analysis, known Go vulnerabilities, race-enabled tests, coverage floors, the
+OpenAPI contract, binaries and container build, PostgreSQL constraints and
+concurrent overspend behaviour. CodeQL runs separately with least-privilege
+workflow permissions.
 
-## Honest limitations
+Detailed procedures are in [Getting started](docs/getting-started.md),
+[Testing](docs/testing.md) and [Operations](docs/operations.md).
 
-- state is lost when the process restarts;
-- authentication headers are development-only;
-- the audit log is append-only in process, not cryptographically tamper-evident;
-- the risk dispatcher is best-effort;
-- there is no distributed locking or durable outbox;
-- no external security review or compliance certification has been performed.
-- `deploy/postgres` is a tested design target; the running service still has no
-  PostgreSQL repository adapter.
+## Configuration
 
-These are not hidden. They define the next engineering milestones.
+| Variable | Default | Purpose |
+|---|---:|---|
+| `SECURELEDGER_ADDR` | `:8080` | HTTP listen address |
+| `SECURELEDGER_STORE` | `memory` | `memory`, `postgres` or `postgresql` |
+| `SECURELEDGER_DATABASE_URL` | none | PostgreSQL connection URI; required by the durable adapter |
+| `SECURELEDGER_MAX_TRANSFER_MINOR` | `100000000` | Maximum accepted amount per transfer |
+| `SECURELEDGER_RISK_THRESHOLD_MINOR` | `1000000` | Amount that creates a risk event |
+| `SECURELEDGER_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
-## Learning path for the maintainer
+Invalid or non-positive numeric limit values fall back to the documented
+defaults. Keep secrets out of committed environment files and logs.
 
-Read and explain the project in this order:
+## Security and scope
 
-1. `internal/domain/model.go`
-2. `internal/store/store.go`
-3. `internal/store/memory/store.go`
-4. `internal/app/service.go`
-5. `internal/httpapi/server.go`
-6. tests
-7. threat model and ADRs
+The current implementation still requires additional controls before any
+internet-facing or real-money use:
 
-For each file, answer: what invariant does it protect, what could fail, and what
-would change with PostgreSQL or multiple service instances?
+- replace asserted identity headers with validated OIDC/workload identities;
+- terminate TLS at a trusted ingress and add rate limits and abuse controls;
+- separate schema-owner, migration and runtime database roles;
+- connect the outbox publisher to a durable external broker or risk service;
+- define currency exponents instead of assuming generic minor units;
+- add backups, restore drills, metrics, tracing and service-level objectives;
+- arrange independent security review and any required regulatory assessment.
+
+No external review, regulatory approval, PCI scope assessment or banking
+certification is claimed. See [Security assumptions](docs/security-assumptions.md),
+[Threat model](docs/threat-model.md) and [SECURITY.md](SECURITY.md).
 
 ## Author
 
-**Volodymyr Stetsenko**
+Volodymyr Stetsenko
 
-Security-focused software engineering, smart-contract security and financial
-systems.
+## License
 
-## Licence
-
-MIT.
+[MIT](LICENSE)

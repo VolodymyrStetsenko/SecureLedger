@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 )
@@ -30,6 +31,26 @@ func TestEnvironmentParsing(t *testing.T) {
 				t.Fatalf("envInt64=%d want=%d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestOpenRepository(t *testing.T) {
+	t.Setenv("SECURELEDGER_STORE", "memory")
+	repo, closeRepository, name, err := openRepository(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeRepository()
+	if name != "memory" {
+		t.Fatalf("repository name=%q", name)
+	}
+	if err := repo.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SECURELEDGER_STORE", "unsupported")
+	if _, _, _, err := openRepository(context.Background()); err == nil {
+		t.Fatal("unsupported repository was accepted")
 	}
 }
 

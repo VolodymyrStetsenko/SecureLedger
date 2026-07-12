@@ -29,7 +29,37 @@ BEGIN
     END;
 END;
 $$;
+
+DO $$
+BEGIN
+    BEGIN
+        UPDATE accounts SET owner_id = 'mallory' WHERE id = 'account:test';
+        RAISE EXCEPTION 'account identity trigger did not reject owner mutation';
+    EXCEPTION
+        WHEN SQLSTATE '55000' THEN NULL;
+    END;
+    BEGIN
+        DELETE FROM accounts WHERE id = 'account:test';
+        RAISE EXCEPTION 'account identity trigger did not reject deletion';
+    EXCEPTION
+        WHEN SQLSTATE '55000' THEN NULL;
+    END;
+END;
+$$;
 SQL
+
+if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+INSERT INTO accounts (id, owner_id, currency, balance_minor, system, created_at, updated_at)
+VALUES ('account:late', 'late', 'GBP', 0, false, now(), now());
+INSERT INTO postings (id, transaction_id, account_id, amount_minor, created_at)
+VALUES ('posting:late', 'transaction:opening', 'account:late', 1, now());
+COMMIT;
+SQL
+then
+  echo "posting was appended to a completed journal transaction" >&2
+  exit 1
+fi
 
 if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
 BEGIN;

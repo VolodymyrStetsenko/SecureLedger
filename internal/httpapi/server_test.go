@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,8 +13,17 @@ import (
 	"testing"
 
 	"github.com/VolodymyrStetsenko/secureledger/internal/app"
+	"github.com/VolodymyrStetsenko/secureledger/internal/store"
 	"github.com/VolodymyrStetsenko/secureledger/internal/store/memory"
 )
+
+type failingPingRepository struct {
+	store.Repository
+}
+
+func (failingPingRepository) Ping(context.Context) error {
+	return errors.New("dependency unavailable")
+}
 
 func TestTransferReplayReturns200(t *testing.T) {
 	t.Parallel()
@@ -120,6 +131,14 @@ func TestAccountAndOversightHTTPFlows(t *testing.T) {
 	if health.StatusCode != http.StatusOK || health.Header.Get("Cache-Control") != "no-store" || health.Header.Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("unexpected health response: status=%d headers=%v", health.StatusCode, health.Header)
 	}
+	ready, err := http.Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ready.Body.Close()
+	if ready.StatusCode != http.StatusOK {
+		t.Fatalf("ready status=%d", ready.StatusCode)
+	}
 
 	alice := createAccountHTTP(t, server.URL, "alice", 2_000_000)
 	bob := createAccountHTTP(t, server.URL, "bob", 0)
@@ -177,6 +196,21 @@ func TestAccountAndOversightHTTPFlows(t *testing.T) {
 	defer limit.Body.Close()
 	if limit.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("limit status=%d", limit.StatusCode)
+	}
+}
+
+func TestReadinessReturns503WhenRepositoryIsUnavailable(t *testing.T) {
+	t.Parallel()
+	repo := failingPingRepository{Repository: memory.New()}
+	server := httptest.NewServer(New(app.New(repo, nil, app.Config{}), nil))
+	defer server.Close()
+	resp, err := http.Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d want=%d", resp.StatusCode, http.StatusServiceUnavailable)
 	}
 }
 

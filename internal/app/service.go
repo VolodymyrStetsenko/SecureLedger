@@ -86,6 +86,10 @@ func (s *Service) GetAccount(ctx context.Context, actor domain.Principal, id str
 	if !actor.Valid() {
 		return domain.Account{}, domain.ErrForbidden
 	}
+	id = strings.TrimSpace(id)
+	if id == "" || len(id) > 128 {
+		return domain.Account{}, domain.ErrInvalidInput
+	}
 	account, err := s.repo.GetAccount(ctx, id)
 	if err != nil {
 		return domain.Account{}, err
@@ -104,6 +108,12 @@ type TransferCommand struct {
 	Description    string `json:"description"`
 }
 
+func (s *Service) Ready(ctx context.Context) error {
+	readyCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return s.repo.Ping(readyCtx)
+}
+
 func (s *Service) Transfer(ctx context.Context, actor domain.Principal, cmd TransferCommand) (store.TransferResult, error) {
 	if !actor.Valid() || actor.Role == domain.RoleAuditor {
 		return store.TransferResult{}, domain.ErrForbidden
@@ -113,7 +123,8 @@ func (s *Service) Transfer(ctx context.Context, actor domain.Principal, cmd Tran
 	cmd.ToAccountID = strings.TrimSpace(cmd.ToAccountID)
 	cmd.Description = strings.TrimSpace(cmd.Description)
 	if len(cmd.IdempotencyKey) < 8 || len(cmd.IdempotencyKey) > 128 ||
-		cmd.FromAccountID == "" || cmd.ToAccountID == "" ||
+		cmd.FromAccountID == "" || len(cmd.FromAccountID) > 128 ||
+		cmd.ToAccountID == "" || len(cmd.ToAccountID) > 128 ||
 		cmd.AmountMinor <= 0 || utf8.RuneCountInString(cmd.Description) > 200 {
 		return store.TransferResult{}, domain.ErrInvalidInput
 	}

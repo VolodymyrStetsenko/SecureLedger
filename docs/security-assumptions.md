@@ -1,45 +1,84 @@
-# Security Assumptions and Deployment Warning
+# Security assumptions and deployment warning
 
-## Intended use
+## Safe execution scope
 
-This version is for local learning, code review, demonstrations and authorised
-testing.
+The supplied configuration is intended for local development, isolated code
+review and authorised testing. Bindings in `compose.yaml` use `127.0.0.1` to
+avoid accidental exposure on other host interfaces.
 
-## Authentication
+Do not place this service on the public internet or use it to hold, transfer or
+represent real customer funds.
 
-The service accepts `X-Principal-ID` and `X-Principal-Role` headers. This makes
-local API exploration easy, but it is **not authentication**. Any client can
-forge them.
+## Identity
 
-Do not expose the service to the internet. A production boundary must validate
-tokens issued by a trusted identity provider, enforce audience/issuer/expiry,
-rotate keys and distinguish human from workload identities.
+`X-Principal-ID` and `X-Principal-Role` are asserted development headers. They
+exercise authorisation policy but provide no authentication: any caller can
+forge either value.
 
-## Persistence
+A production identity boundary would need, at minimum:
 
-The default repository is in memory. Process termination destroys all state.
-The implementation demonstrates atomic business logic, not durability.
+- TLS from a trusted ingress;
+- signature validation for an accepted token algorithm;
+- issuer, audience, expiry and not-before validation;
+- key rotation and failure behaviour;
+- separate human and workload identities;
+- tenant-aware subject mapping;
+- protection against a client bypassing the trusted ingress.
 
-## Money representation
+## Persistence and database authority
 
-Amounts use signed 64-bit integers in minor units. The current currency
-validation accepts three uppercase letters and assumes two-decimal currencies
-for human interpretation. Production code needs a currency metadata registry
-and overflow analysis.
+The default adapter is volatile memory. PostgreSQL mode is durable and enforces
+ledger constraints, but the local Compose user owns broad database privileges.
+That credential model is for reproducibility, not production separation.
 
-## Availability
+A deployed service should not own its schema. Migration and runtime roles
+should be distinct, runtime permissions should be minimal, and backups should
+be encrypted, monitored and restoration-tested.
 
-The service sets HTTP timeouts and limits request bodies. It does not implement
-rate limiting, admission control, circuit breakers or load shedding.
+## Monetary representation
 
-## Audit evidence
+Amounts use signed 64-bit integer minor units. A value of `2500` means 25.00
+only for a currency whose exponent is two. The validator accepts three uppercase
+ASCII letters but does not maintain an ISO 4217 exponent registry, exchange
+rates, cash rounding rules or currency lifecycle.
 
-Audit entries are append-only through the public interface, but a process or
-host administrator can alter memory. Production evidence needs durable,
-access-controlled, tamper-evident storage and retention rules.
+The API rejects negative/zero transfer amounts and checks arithmetic boundaries.
+It does not implement fees, holds, reversals, chargebacks or foreign exchange.
 
-## Risk processing
+## Journal and reconciliation
 
-Risk events are written synchronously to the repository, then sent to a
-best-effort background dispatcher. The dispatcher may drop alerts when its
-buffer is full. A transactional outbox is required for reliable delivery.
+PostgreSQL triggers make journal transactions, postings, transfer intents and
+audit records append-only for ordinary writes. A schema owner can still disable
+or replace those controls. The reconciliation command detects a difference
+between balances and postings but intentionally does not auto-repair it.
+
+Production evidence needs access controls, retention policy, monitored exports
+and a tamper-evident or independently administered destination.
+
+## Risk events
+
+PostgreSQL mode stores risk events in the same transaction as a qualifying
+transfer. The worker retries delivery and recovers stale claims. The included
+publisher writes a structured log event; it is not an AML, sanctions or fraud
+decision system and is not a substitute for a durable external event service.
+
+Memory mode uses a bounded process-local queue and can lose events on shutdown
+or when the queue is full.
+
+## Availability and operations
+
+The HTTP server has finite header, read, write and idle timeouts plus a body
+limit. The repository uses bounded database retries. The project does not yet
+include rate limiting, autoscaling, multi-region failover, backup automation,
+service-level objectives, metrics or distributed tracing.
+
+`/healthz` proves that the process is serving HTTP. `/readyz` also pings the
+configured repository. Neither endpoint proves that every downstream external
+publisher is available.
+
+## Assurance
+
+Tests, CodeQL, database constraints and documented threat analysis provide
+engineering evidence, not certification. No independent penetration test,
+formal verification, regulatory assessment or external security approval is
+claimed.

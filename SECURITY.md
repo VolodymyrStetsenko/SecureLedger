@@ -1,32 +1,44 @@
-# Security Policy
+# Security policy
 
-## Supported versions
+## Supported version
 
-This repository is an educational and portfolio reference implementation. Only
-the latest commit on `main` is maintained.
+Only the latest commit on `main` receives security fixes.
 
-## Reporting a vulnerability
+## Report a vulnerability
 
-Please do not open a public issue for a vulnerability that could create risk for
-users who deploy a fork. Prefer GitHub's **Report a vulnerability** private
-reporting form on the repository Security tab. If private reporting is not
-available, use the security contact listed on the maintainer's GitHub profile.
+Do not open a public issue for a suspected vulnerability. Use GitHub's private
+**Report a vulnerability** form on the repository Security tab. If private
+reporting is unavailable, use the security contact on the maintainer's GitHub
+profile.
 
-Include:
+Include enough information to reproduce and assess the report:
 
-- affected component and commit;
-- preconditions;
-- reproducible proof of concept in an isolated environment;
-- impact;
-- suggested remediation, if known.
+- affected commit and component;
+- required preconditions and configuration;
+- isolated reproduction steps or test;
+- observed and expected behaviour;
+- confidentiality, integrity or availability impact;
+- a remediation idea, if available.
 
-## Scope and safe testing
+Do not include real credentials, customer data or third-party system details.
 
-Testing is authorised only against a copy you own or an environment where you
-have explicit permission. Do not test third-party systems using this project.
+## Safe testing
 
-## Important limitations
+Test only a local copy you control or an environment where you have explicit
+authorisation. Do not scan or probe third-party services using this project.
 
-SecureLedger is **not** certified banking software. The default adapter stores
-state in memory, and the development authentication mechanism trusts local
-headers. Review `docs/security-assumptions.md` before running it.
+## Response expectations
+
+Reports are triaged by reproducibility, affected security boundary and impact.
+A fix should include a regression test and updates to the threat model or an ADR
+when the underlying design changes. Disclosure timing is coordinated after a
+supported fix is available.
+
+## Deployment warning
+
+SecureLedger is not certified banking or payment-processing software. The
+included identity headers are not authentication, and the local Compose
+credentials do not provide production database privilege separation. Do not
+expose the supplied configuration to an untrusted network or use it for real
+funds. Review [security assumptions](docs/security-assumptions.md) before
+execution.

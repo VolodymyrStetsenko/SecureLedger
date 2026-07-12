@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SecureLedger API
-  version: 0.1.1
+  version: 0.2.0
   description: |
     Local reference API for security-focused ledger engineering.
     X-Principal-* headers are a development-only identity boundary and must not
@@ -37,6 +37,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+  /readyz:
+    get:
+      summary: Check service readiness
+      description: Verifies that the configured repository dependency can accept requests.
+      tags: [System]
+      operationId: readiness
+      security: []
+      responses:
+        "200":
+          description: Service dependencies are available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        "503":
+          description: A required service dependency is unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
   /v1/accounts:
     post:
       summary: Create an account
@@ -71,7 +90,7 @@ paths:
         - name: accountId
           in: path
           required: true
-          schema: { type: string, minLength: 1 }
+          schema: { type: string, minLength: 1, maxLength: 128 }
         - $ref: "#/components/parameters/PrincipalId"
         - $ref: "#/components/parameters/PrincipalRole"
       responses:
@@ -81,6 +100,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Account"
+        "400": { $ref: "#/components/responses/BadRequest" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
   /v1/transfers:
@@ -216,7 +236,7 @@ components:
       in: header
       required: true
       description: Development-only asserted principal identifier.
-      schema: { type: string, minLength: 1 }
+      schema: { type: string, minLength: 1, maxLength: 128 }
     PrincipalRole:
       name: X-Principal-Role
       in: header
@@ -269,6 +289,12 @@ components:
       required: [status]
       properties:
         status: { type: string, const: ok }
+    Readiness:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, const: ready }
     CreateAccountRequest:
       type: object
       additionalProperties: false
@@ -282,8 +308,8 @@ components:
       additionalProperties: false
       required: [id, owner_id, currency, balance_minor, system, created_at]
       properties:
-        id: { type: string }
-        owner_id: { type: string }
+        id: { type: string, minLength: 1, maxLength: 128 }
+        owner_id: { type: string, minLength: 1, maxLength: 128 }
         currency: { type: string, pattern: "^[A-Z]{3}$" }
         balance_minor: { type: integer, format: int64 }
         system: { type: boolean, const: false }
@@ -293,8 +319,8 @@ components:
       additionalProperties: false
       required: [from_account_id, to_account_id, amount_minor]
       properties:
-        from_account_id: { type: string, minLength: 1 }
-        to_account_id: { type: string, minLength: 1 }
+        from_account_id: { type: string, minLength: 1, maxLength: 128 }
+        to_account_id: { type: string, minLength: 1, maxLength: 128 }
         amount_minor: { type: integer, format: int64, minimum: 1 }
         description: { type: string, maxLength: 200, default: "" }
     TransferIntent:
