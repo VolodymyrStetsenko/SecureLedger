@@ -20,6 +20,7 @@ All notable changes will be documented here.
 - expanded negative, concurrency, context and HTTP-boundary tests;
 - added an executable PostgreSQL schema verification script;
 - corrected the demo script's JSON quoting.
+- anchored the generated-binary ignore rule so `cmd/secureledger` remains tracked.
 
 ## [0.1.0] - 2026-07-12
 
