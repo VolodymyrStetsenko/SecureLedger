@@ -1,0 +1,49 @@
+name: secureledger
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: secureledger
+      POSTGRES_USER: secureledger
+      POSTGRES_PASSWORD: secureledger
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secureledger -d secureledger"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - secureledger_postgres:/var/lib/postgresql/data
+      - ./deploy/postgres/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+
+  app:
+    build:
+      context: .
+    environment:
+      SECURELEDGER_ADDR: :8080
+      SECURELEDGER_STORE: postgres
+      SECURELEDGER_DATABASE_URL: postgresql://secureledger:secureledger@postgres:5432/secureledger?sslmode=disable
+      SECURELEDGER_MAX_TRANSFER_MINOR: "100000000"
+      SECURELEDGER_RISK_THRESHOLD_MINOR: "1000000"
+      SECURELEDGER_LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/secureledger-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  secureledger_postgres:

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,21 +16,44 @@ import (
 	"github.com/VolodymyrStetsenko/secureledger/internal/app"
 	"github.com/VolodymyrStetsenko/secureledger/internal/httpapi"
 	"github.com/VolodymyrStetsenko/secureledger/internal/risk"
+	"github.com/VolodymyrStetsenko/secureledger/internal/store"
 	"github.com/VolodymyrStetsenko/secureledger/internal/store/memory"
+	postgresstore "github.com/VolodymyrStetsenko/secureledger/internal/store/postgres"
 )
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: envLogLevel("SECURELEDGER_LOG_LEVEL", slog.LevelInfo),
 	}))
+	if err := run(log); err != nil {
+		log.Error("secureledger stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	repo := memory.New()
-	dispatcher := risk.NewDispatcher(log, 128)
-	go dispatcher.Run(ctx)
+	repo, closeRepository, repositoryName, err := openRepository(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeRepository()
 
-	service := app.New(repo, dispatcher, app.Config{
+	var notifier app.RiskNotifier
+	if outbox, ok := repo.(risk.Outbox); ok {
+		worker := risk.NewWorker(outbox, risk.NewLogPublisher(log), log)
+		go worker.Run(ctx)
+		log.Info("durable risk outbox enabled")
+	} else {
+		dispatcher := risk.NewDispatcher(log, 128)
+		go dispatcher.Run(ctx)
+		notifier = dispatcher
+		log.Warn("risk delivery is process-local", "repository", repositoryName)
+	}
+
+	service := app.New(repo, notifier, app.Config{
 		MaxTransferMinor:   envInt64("SECURELEDGER_MAX_TRANSFER_MINOR", 100_000_000),
 		RiskThresholdMinor: envInt64("SECURELEDGER_RISK_THRESHOLD_MINOR", 1_000_000),
 	})
@@ -46,7 +70,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("secureledger listening", "addr", server.Addr)
+		log.Info("secureledger listening", "addr", server.Addr, "repository", repositoryName)
 		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -56,15 +80,31 @@ func main() {
 	case <-ctx.Done():
 		log.Info("shutdown requested")
 	case err := <-errCh:
-		log.Error("server failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("serve HTTP: %w", err)
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Error("graceful shutdown failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("graceful shutdown: %w", err)
+	}
+	return nil
+}
+
+func openRepository(ctx context.Context) (store.Repository, func(), string, error) {
+	switch strings.ToLower(strings.TrimSpace(envString("SECURELEDGER_STORE", "memory"))) {
+	case "memory":
+		return memory.New(), func() {}, "memory", nil
+	case "postgres", "postgresql":
+		openCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		repo, err := postgresstore.Open(openCtx, os.Getenv("SECURELEDGER_DATABASE_URL"))
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("open PostgreSQL repository: %w", err)
+		}
+		return repo, repo.Close, "postgres", nil
+	default:
+		return nil, nil, "", fmt.Errorf("unsupported SECURELEDGER_STORE value")
 	}
 }
 

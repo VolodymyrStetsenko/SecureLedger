@@ -1,76 +1,114 @@
-# Threat Model
+# Threat model
 
-## Method
+## Scope and method
 
-This model combines asset/trust-boundary analysis with STRIDE-style prompts.
-It is deliberately specific to the current implementation.
+This model covers the Go service, both repository adapters, the PostgreSQL
+schema, the risk outbox and the supplied local deployment. It uses assets,
+trust boundaries, abuse cases and STRIDE-style prompts. Controls listed as
+current are present in the repository; planned controls are not treated as
+implemented.
 
-## Assets
+## Protected assets
 
-- account balances;
-- journal integrity;
-- idempotency mappings;
-- actor identity and role;
-- audit records;
-- risk events;
-- service availability;
-- configuration values.
+- correctness of customer and system account balances;
+- completeness, ordering and immutability of journal postings;
+- uniqueness and request binding of idempotency records;
+- integrity of actor identity and role attributes;
+- confidentiality of database credentials and operational configuration;
+- completeness and integrity of audit and risk records;
+- availability of the write path and database;
+- correctness of reconciliation evidence.
 
 ## Trust boundaries
 
-1. Untrusted client to HTTP API.
-2. HTTP identity headers to authorisation policy.
-3. Application service to repository atomicity boundary.
-4. Committed transaction to asynchronous risk dispatcher.
-5. Process memory to host operating system.
+```mermaid
+flowchart TB
+    Untrusted["Untrusted network/client"] --> Identity["Identity and ingress boundary"]
+    Identity --> API["Go HTTP process"]
+    API --> DBAuth["Database credential boundary"]
+    DBAuth --> DB[("PostgreSQL")]
+    DB --> Publisher["Risk publisher boundary"]
+```
 
-## Primary threats and controls
+The repository supplies only a development identity boundary. Therefore the
+safe deployment scope ends before an untrusted network: any caller able to send
+requests can forge `X-Principal-ID` and `X-Principal-Role`.
 
-| Threat | Example | Current control | Residual risk / next step |
+## Threats, controls and residual risk
+
+| Threat | Abuse case | Implemented control | Residual risk / required control |
 |---|---|---|---|
-| Spoofing | forge `X-Principal-ID` | explicitly local-only | replace with validated OIDC/JWT |
-| Tampering | alter one side of a transfer | repository creates both postings atomically | durable DB constraints |
-| Replay | resend a transfer after timeout | mandatory actor-scoped idempotency key | bind key to request hash durably |
-| Elevation | customer moves another owner's funds | ownership-aware policy | external policy engine / tests |
-| Race | concurrent transfers overspend | repository mutex and race tests | row locking/serialisable DB |
-| Repudiation | actor denies transfer | append-only audit record | signed/tamper-evident export |
-| Information disclosure | verbose internal errors | stable public error mapping | structured redaction policy |
-| Denial of service | oversized JSON body | 1 MiB request limit, timeouts | rate limiting and quotas |
-| Event loss | risk worker unavailable | event stored synchronously | transactional outbox |
-| Integer error | floating-point rounding | `int64` minor units | currency-specific scale registry |
+| Spoofing | Caller asserts `admin` | Explicit local-only boundary; role validation | Validated OIDC/workload identity, trusted ingress, issuer/audience/expiry checks |
+| Horizontal escalation | Customer debits a known foreign account ID | Source-account ownership check in application policy | Centralised policy and tenant scope for a multi-tenant deployment |
+| Journal tampering | One side of a transfer is changed or deleted | Atomic repository write, deferred balance constraint, append-only triggers | Separate schema/runtime roles; tamper-evident archival export |
+| Balance tampering | Materialised balance differs from journal | Same-transaction update and executable reconciliation | Scheduled monitored reconciliation and incident procedure |
+| Replay | Timeout causes a client retry | Mandatory actor-scoped key, unique DB constraint, immutable fingerprint | Tenant scope, retention policy and documented client retry contract |
+| Double spend | Concurrent debits observe the same funds | Mutex adapter; serializable PostgreSQL transaction; deterministic row locks; concurrency test | Capacity/load testing and production lock/abort telemetry |
+| Repudiation | Actor denies a transfer | Audit row committed atomically with transfer | Authenticated identity, retention policy, external tamper-evident storage |
+| Information disclosure | Internal database error reaches caller | Stable public error mapper; request bodies excluded from logs | Formal log-field allowlist, secret scanning and central retention controls |
+| Resource exhaustion | Oversized or slow request consumes workers | 1 MiB body limit and HTTP read/write/header/idle timeouts | Rate limits, connection limits, quotas and load shedding at ingress |
+| Event loss | Process stops after financial commit | Transactional outbox in PostgreSQL mode; stale-lease recovery | External durable sink, delivery SLO and dead-letter procedure |
+| Duplicate event | Worker publishes but cannot mark success | Stable event ID and at-least-once semantics | Consumer-side deduplication by event ID |
+| Dependency compromise | Malicious Go or Action dependency | Pinned module versions, `go.sum`, Dependabot, CodeQL, read-only CI permissions | Provenance verification, release signing and dependency review policy |
+| Credential misuse | Runtime DB role alters schema or history | Local triggers and container hardening | Distinct least-privilege production roles and secret rotation |
 
-## Abuse cases
+## Detailed abuse cases
 
-### Duplicate payment
+### Ambiguous client timeout
 
-A client times out after a successful commit and retries. The same idempotency
-key must return the original transfer without adding postings.
+The database may commit immediately before the HTTP connection fails. The
+caller retries the same request and key. The repository returns the stored
+transfer without another balance update. Retrying with a new key is a new
+financial command and is outside the idempotency guarantee.
 
-### Horizontal privilege escalation
+### Idempotency-key substitution
 
-A customer knows another account ID and attempts to debit it. The service checks
-that the actor owns the source account unless the role is operator or admin.
+An actor reuses a previous key while changing the amount, account IDs or
+description. The service compares the new intent with the immutable stored
+intent and returns `idempotency_conflict`. The stored SHA-256 fingerprint is
+also recomputed on read to detect internal inconsistency.
 
 ### Concurrent overspend
 
-Multiple goroutines transfer from one account simultaneously. The repository
-serialises the state transition and rejects operations after funds are
-exhausted.
+Two transactions try to debit 80 from a balance of 100. Both account pairs are
+locked deterministically and PostgreSQL executes them under serializable
+isolation. At most one can commit; the other retries against the committed
+balance and receives `insufficient_funds`. The integration test asserts final
+balances as well as response outcomes.
 
-### Idempotency-key confusion
+### Partial financial write
 
-A client reuses a key for a different transfer intent. The repository compares
-the original and new intent and returns a conflict instead of replaying an
-unrelated transfer. The scope includes the actor identifier to avoid collisions
-between independent clients; a production design should add tenant scope.
+A failure occurs after the source update but before the destination posting.
+All writes are inside one database transaction. The transaction rolls back, and
+the deferred posting constraint prevents an incomplete journal from committing.
 
-## Out of scope for version 0.1
+### Outbox worker termination
 
-- compromise of the host or Go runtime;
-- cryptographic key management;
-- malicious database administrator;
-- multi-region failure;
-- sanctions/AML decisions;
-- card-data processing;
-- public blockchain settlement;
-- formal regulatory compliance.
+A worker claims an event and terminates. The row remains `processing`. After the
+one-minute lease expires, another worker can claim it. If publication occurred
+before termination, the event can be delivered twice; consumers must use its
+stable ID for deduplication.
+
+### Direct database mutation
+
+A credential with excessive privilege can update `accounts` or replace
+triggers. Reconciliation detects balance drift but cannot establish trustworthy
+attribution against a malicious schema owner. Production role separation and
+external evidence storage are required.
+
+## Out of scope
+
+- compromise of the operating system, Go runtime or PostgreSQL administrator;
+- real sanctions, fraud, AML/KYC or customer-risk decisions;
+- cardholder data, card-network processing or PCI DSS scope;
+- bank licensing, deposit protection or regulatory reporting;
+- multi-region consensus and disaster recovery;
+- cryptographic key management and hardware security modules;
+- currency exponent and exchange-rate management;
+- public blockchain settlement.
+
+## Review triggers
+
+Update this model when a change adds an identity provider, a new money-moving
+operation, a different event sink, tenant boundaries, new database privileges,
+public network exposure or sensitive personal data.

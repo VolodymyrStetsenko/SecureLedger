@@ -51,6 +51,7 @@ func New(service *app.Service, log *slog.Logger) http.Handler {
 	s := &Server{service: service, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("POST /v1/accounts", s.createAccount)
 	mux.HandleFunc("GET /v1/accounts/{id}", s.getAccount)
 	mux.HandleFunc("POST /v1/transfers", s.createTransfer)
@@ -87,6 +88,14 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.Ready(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "not_ready", "service dependencies are unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {

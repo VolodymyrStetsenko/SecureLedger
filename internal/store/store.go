@@ -26,6 +26,7 @@ type TransferResult struct {
 }
 
 type Repository interface {
+	Ping(context.Context) error
 	CreateAccount(context.Context, CreateAccountInput) error
 	GetAccount(context.Context, string) (domain.Account, error)
 	ApplyTransfer(context.Context, ApplyTransferInput) (TransferResult, error)

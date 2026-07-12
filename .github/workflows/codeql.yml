@@ -21,7 +21,11 @@ jobs:
   analyze:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
       - uses: github/codeql-action/init@v4
         with:
           languages: go

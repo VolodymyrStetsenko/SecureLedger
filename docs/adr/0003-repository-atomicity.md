@@ -18,5 +18,6 @@ service performs policy checks but does not orchestrate individual writes.
 
 - consistency requirements are explicit;
 - the memory implementation can use one lock;
-- a PostgreSQL adapter must implement the same all-or-nothing contract;
+- the PostgreSQL implementation uses one serializable transaction and retries
+  complete operations after retryable aborts;
 - repository methods are domain-specific rather than generic CRUD.
