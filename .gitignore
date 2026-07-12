@@ -1,0 +1,23 @@
+# Binaries
+/bin/
+/dist/
+secureledger
+
+# Go
+*.test
+*.out
+coverage.out
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Runtime
+/tmp/
+*.log
